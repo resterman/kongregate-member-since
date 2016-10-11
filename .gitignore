@@ -1,0 +1,11 @@
+# User data
+user_data/
+user_with_dates/
+
+# Idea
+.idea/
+*.iml
+
+# Python
+venv/
+*.log
