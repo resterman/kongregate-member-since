@@ -132,9 +132,11 @@ def pickle_state(state):
 
 
 def main(args):
-    logging.basicConfig(filename='member_since.log', level=logging.DEBUG)
-    logging.getLogger('requests').setLevel(logging.WARNING)
-    logger = logging.getLogger()
+    logging.basicConfig(level=logging.DEBUG)
+    logging.getLogger('requests').propagate = False
+
+    logger = logging.getLogger('kong_member_since')
+    logger.setLevel(logging.INFO)
 
     user_data_path = args[1]
     user_with_dates_path = args[2]
