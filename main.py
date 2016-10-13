@@ -6,14 +6,23 @@ import sys
 from datetime import datetime
 
 import grequests
+import pickle
 import requests
 from bs4 import BeautifulSoup
 
 ID_STEP = 50
-REQUEST_SLEEP_TIME = 60 * 2
+REQUEST_SLEEP_TIME = 60 * 10
 USER_INFO_URL = 'http://www.kongregate.com/api/user_info.json?user_ids={ids}'
 PROFILE_URL = 'http://www.kongregate.com/accounts/{}'
 MEMBER_SINCE_RE = re.compile('Member Since', re.I)
+SAVE_FILE = 'state.pickle'
+MESSAGES = {
+    'FILE_START':           'Starting with {}',
+    'REMOVED_USERS':        '{} removed, from {} to {}',
+    'CURRENT_STATE':        'Chunk size: {} - Remaining users: {} - Chunks removed: {}',
+    'PERCENTAGE_COMPLETE':  '{:.2f}% completed, {} users remaining',
+    'TIME_ELAPSED':         'Time elapsed for {}: {}',
+}
 
 
 class User(object):
@@ -58,6 +67,14 @@ class User(object):
         return '<{}, {}>'.format(self.id, self.username)
 
 
+class ParserState(object):
+
+    def __init__(self, users_with_dates, users_without_dates, chunk_size):
+        self.users_with_dates = users_with_dates
+        self.users_without_dates = users_without_dates
+        self.chunk_size = chunk_size
+
+
 def handler(urls):
     def f(request, exception):
         print(exception)
@@ -98,7 +115,7 @@ def load_users_http(max_connections=100):
 
 def load_users_csv(path):
     users = []
-    with open(path, 'r', encoding='utf-7') as f:
+    with open(path, 'r', encoding='utf-8') as f:
         for row in f:
             line = row.replace('\n', '').split(',')
             users.append(User(int(line[0]), line[1]))
@@ -107,6 +124,11 @@ def load_users_csv(path):
 
 def nullable_strptime(date):
     return date.strftime('%Y-%m-%d') if date is not None else ''
+
+
+def pickle_state(state):
+    with open(SAVE_FILE, 'wb') as f:
+        pickle.dump(state, f)
 
 
 def main(args):
@@ -121,12 +143,23 @@ def main(args):
              if path.replace('user_data/', '') not in os.listdir(user_with_dates_path))
 
     for path in paths:
-        logger.info('Starting with {}'.format(path))
+        logger.info(MESSAGES['FILE_START'].format(path))
+
+        state = None
+        if os.path.exists(SAVE_FILE):
+            with open(SAVE_FILE, 'rb') as f:
+                state = pickle.load(f)
+
+        if state is None:
+            chunk_size = 2 ** 12
+            saved_users = sorted(load_users_csv(path), key=lambda x: x.id)
+            users_without_dates = saved_users[:]
+        else:
+            chunk_size = state.chunk_size
+            saved_users = state.users_with_dates
+            users_without_dates = state.users_without_dates
 
         start_time = time.time()
-        chunk_size = 2 ** 12
-        saved_users = sorted(load_users_csv(path), key=lambda x: x.id)
-        users_without_dates = saved_users[:]
         total_users = len(saved_users)
 
         while users_without_dates and chunk_size > 1:
@@ -143,7 +176,8 @@ def main(args):
                 first_date, last_date = first_user.member_since, last_user.member_since
 
                 if first_date is not None and last_date is not None and first_date == last_date:
-                    logger.info('{} removed, from {} to {}'.format(len(chunk), first_user.id, last_user.id))
+                    logger.info(MESSAGES['REMOVED_USERS'].format(len(chunk), first_user.id, last_user.id))
+
                     chunks_removed += 1
                     for user in chunk:
                         user.member_since = first_date
@@ -151,13 +185,15 @@ def main(args):
                     users_without_dates += chunk
 
             chunk_size >>= 1
-            logger.debug('Chunk size: {} - Remaining users: {} - Chunks removed: {}'.format(chunk_size,
-                                                                                            len(users_without_dates),
-                                                                                            chunks_removed))
-            print('{:.2f}% completed'.format((1 - len(users_without_dates) / total_users) * 100))
+            remaining_users = len(users_without_dates)
+
+            logger.debug(MESSAGES['CURRENT_STATE'].format(chunk_size, remaining_users, chunks_removed))
+            print(MESSAGES['PERCENTAGE_COMPLETE'].format((1 - remaining_users / total_users) * 100, remaining_users))
+
+            pickle_state(ParserState(saved_users, users_without_dates, chunk_size))
 
         end_time = time.time()
-        print('Time elapsed for {}: {}'.format(path, end_time - start_time))
+        print(MESSAGES['TIME_ELAPSED'].format(path, end_time - start_time))
 
         def by_id(x):
             return x.id
@@ -178,6 +214,8 @@ def main(args):
         with open(path.replace('user_data', 'user_with_dates'), 'w') as f:
             for user in saved_users:
                 f.write('{},{},{}\n'.format(user.id, user.username, nullable_strptime(user.member_since)))
+
+        pickle_state(None)
 
 
 if __name__ == '__main__':

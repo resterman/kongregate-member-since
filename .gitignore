@@ -9,3 +9,4 @@ user_with_dates/
 # Python
 venv/
 *.log
+*.pickle
