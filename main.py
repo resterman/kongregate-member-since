@@ -1,8 +1,10 @@
+import csv
 import os
 import time
 import logging
 import re
 import sys
+from collections import namedtuple
 from datetime import datetime
 
 import grequests
@@ -10,27 +12,37 @@ import pickle
 import requests
 from bs4 import BeautifulSoup
 
+
+ParserState = namedtuple('ParserState', ['users', 'chunk_size'])
+
 ID_STEP = 50
 REQUEST_SLEEP_TIME = 60 * 10
+STEPS_TO_PICKLE = 2 ** 8
 USER_INFO_URL = 'http://www.kongregate.com/api/user_info.json?user_ids={ids}'
 PROFILE_URL = 'http://www.kongregate.com/accounts/{}'
 MEMBER_SINCE_RE = re.compile('Member Since', re.I)
 SAVE_FILE = 'state.pickle'
+LOGGER_NAME = 'kong_member_since'
 MESSAGES = {
     'FILE_START':           'Starting with {}',
     'REMOVED_USERS':        '{} removed, from {} to {}',
     'CURRENT_STATE':        'Chunk size: {} - Remaining users: {} - Chunks removed: {}',
     'PERCENTAGE_COMPLETE':  '{:.2f}% completed, {} users remaining',
     'TIME_ELAPSED':         'Time elapsed for {}: {}',
+    'DATE_CALCULATE':       'Deducing date for user {}',
+    'ALREADY_WITH_DATE':    'User {} already had a defined date',
+    'DATE_CALCULATED':      'User {} now has member since date {}',
+    'DATE_NOT_CALCULATED':  'User {} has a non inferable member since date',
+    'PICKLING':             'Saving data',
 }
 
 
 class User(object):
 
-    def __init__(self, id, username):
+    def __init__(self, id, username, member_since=None):
         self.id = id
         self.username = username
-        self.member_since = None
+        self.member_since = member_since
         self.member_since_fetched = False
 
     def fetch_member_since(self):
@@ -53,7 +65,7 @@ class User(object):
             logger = logging.getLogger()
             logger.exception('')
 
-            print('Going to sleep...')
+            logger.warn('Going to sleep...')
             time.sleep(REQUEST_SLEEP_TIME)  # Wait some time to stop getting denied responses
             self.fetch_member_since()
 
@@ -65,14 +77,6 @@ class User(object):
 
     def __repr__(self):
         return '<{}, {}>'.format(self.id, self.username)
-
-
-class ParserState(object):
-
-    def __init__(self, users_with_dates, users_without_dates, chunk_size):
-        self.users_with_dates = users_with_dates
-        self.users_without_dates = users_without_dates
-        self.chunk_size = chunk_size
 
 
 def handler(urls):
@@ -131,11 +135,88 @@ def pickle_state(state):
         pickle.dump(state, f)
 
 
+def load_state(path):
+    """
+    Gets the initial state for the parser. Checks if there's one already stored, if not, sets the default.
+
+    :param path: Path of the file of users to load if there's no state already saved.
+    :return: A triple with current chunk size, saved users and users with no member since date
+    """
+    logger = logging.getLogger(LOGGER_NAME)
+
+    state = None
+    if os.path.exists(SAVE_FILE):
+        with open(SAVE_FILE, 'rb') as f:
+            state = pickle.load(f)
+
+    if state is None:
+        chunk_size = 2 ** 12
+        saved_users = sorted(load_users_csv(path), key=lambda x: x.id)
+        users_without_dates = saved_users[:]
+    else:
+        logger.info('Chunk size: {}'.format(state.chunk_size))
+        logger.info('Total users: {}'.format(len(state.users)))
+
+        chunk_size = state.chunk_size
+        saved_users = state.users
+        users_without_dates = [user for user in state.users
+                               if user.member_since is None and not user.member_since_fetched]
+
+    return chunk_size, saved_users, users_without_dates
+
+
+def deduce_dates(users_with_dates, users_without_dates):
+    """
+    Tries to set the dates for every user inside users_without_dates looking for the nearest previous and next users
+    with defined member since dates. If those dates are equal, it can be said that the user's date will be the same.
+
+    :param users_with_dates: Users with defined member since date
+    :param users_without_dates: Users without defined member since date
+    :return: None
+    """
+    logger = logging.getLogger(LOGGER_NAME)
+
+    def by_id(x):
+        return x.id
+
+    for user in users_without_dates:
+        if user.member_since is not None:
+            logger.info(MESSAGES['ALREADY_WITH_DATE'].format(user.id))
+            continue
+
+        prev_users = user.previous_users(users_with_dates)
+        prev_user = max(prev_users, key=by_id, default=None)
+
+        next_users = user.next_users(users_with_dates)
+        next_user = min(next_users, key=by_id, default=None)
+
+        if prev_user and next_user and prev_user.member_since == next_user.member_since:
+            logger.info(MESSAGES['DATE_CALCULATED'].format(user.id, prev_user.member_since))
+            user.member_since = prev_user.member_since
+        else:
+            logger.info(MESSAGES['DATE_NOT_CALCULATED'].format(user.id))
+
+
+def save_users(path, users):
+    """
+    Saves every user in a csv file formatted as [id, username, member since date]
+
+    :param path: Path of the file
+    :type path: str
+    :param users: Users to save
+    :type users: list
+    :return: None
+    """
+    with open(path, 'w') as f:
+        csv_writer = csv.writer(f)
+        csv_writer.writerows([user.id, user.username, nullable_strptime(user.member_since)] for user in users)
+
+
 def main(args):
     logging.basicConfig(level=logging.DEBUG)
     logging.getLogger('requests').propagate = False
 
-    logger = logging.getLogger('kong_member_since')
+    logger = logging.getLogger(LOGGER_NAME)
     logger.setLevel(logging.INFO)
 
     user_data_path = args[1]
@@ -147,22 +228,11 @@ def main(args):
     for path in paths:
         logger.info(MESSAGES['FILE_START'].format(path))
 
-        state = None
-        if os.path.exists(SAVE_FILE):
-            with open(SAVE_FILE, 'rb') as f:
-                state = pickle.load(f)
+        chunk_size, users, users_without_dates = load_state(path)
 
-        if state is None:
-            chunk_size = 2 ** 12
-            saved_users = sorted(load_users_csv(path), key=lambda x: x.id)
-            users_without_dates = saved_users[:]
-        else:
-            chunk_size = state.chunk_size
-            saved_users = state.users_with_dates
-            users_without_dates = state.users_without_dates
-
+        steps_to_pickle = STEPS_TO_PICKLE
         start_time = time.time()
-        total_users = len(saved_users)
+        total_users = len(users)
 
         while users_without_dates and chunk_size > 1:
             user_chunks = [users_without_dates[x:x+chunk_size] for x in range(0, len(users_without_dates), chunk_size)]
@@ -186,36 +256,24 @@ def main(args):
                 else:
                     users_without_dates += chunk
 
+                steps_to_pickle = (steps_to_pickle - 1) % STEPS_TO_PICKLE
+                if steps_to_pickle == 0:
+                    logger.info(MESSAGES['PICKLING'])
+                    pickle_state(ParserState(users, chunk_size))
+
             chunk_size >>= 1
             remaining_users = len(users_without_dates)
 
             logger.debug(MESSAGES['CURRENT_STATE'].format(chunk_size, remaining_users, chunks_removed))
-            print(MESSAGES['PERCENTAGE_COMPLETE'].format((1 - remaining_users / total_users) * 100, remaining_users))
-
-            pickle_state(ParserState(saved_users, users_without_dates, chunk_size))
+            logger.info(MESSAGES['PERCENTAGE_COMPLETE'].format((1 - remaining_users / total_users) * 100,
+                                                               remaining_users))
 
         end_time = time.time()
-        print(MESSAGES['TIME_ELAPSED'].format(path, end_time - start_time))
+        logger.info(MESSAGES['TIME_ELAPSED'].format(path, end_time - start_time))
 
-        def by_id(x):
-            return x.id
-
-        for user in users_without_dates:
-            if user.member_since is not None:
-                continue
-
-            prev_users = filter(lambda x: x.member_since is not None, user.previous_users(saved_users))
-            prev_user = max(prev_users, key=by_id, default=None)
-
-            next_users = filter(lambda x: x.member_since is not None, user.next_users(saved_users))
-            next_user = min(next_users, key=by_id, default=None)
-
-            if prev_user and next_user and prev_user.member_since == next_user.member_since:
-                user.member_since = prev_user.member_since
-
-        with open(path.replace('user_data', 'user_with_dates'), 'w') as f:
-            for user in saved_users:
-                f.write('{},{},{}\n'.format(user.id, user.username, nullable_strptime(user.member_since)))
+        users_with_dates = filter(lambda x: x.member_since is not None, users)
+        deduce_dates(users_with_dates, users_without_dates)
+        save_users(path.replace('user_data', 'user_with_dates'), users)
 
         pickle_state(None)
 

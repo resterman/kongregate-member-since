@@ -1,6 +1,5 @@
 # User data
-user_data/
-user_with_dates/
+user_*/
 
 # Idea
 .idea/
@@ -8,5 +7,6 @@ user_with_dates/
 
 # Python
 venv/
+__pycache__/
 *.log
 *.pickle
