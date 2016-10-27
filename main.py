@@ -24,16 +24,14 @@ MEMBER_SINCE_RE = re.compile('Member Since', re.I)
 SAVE_FILE = 'state.pickle'
 LOGGER_NAME = 'kong_member_since'
 MESSAGES = {
-    'FILE_START':           'Starting with {}',
-    'REMOVED_USERS':        '{} removed, from {} to {}',
-    'CURRENT_STATE':        'Chunk size: {} - Remaining users: {} - Chunks removed: {}',
-    'PERCENTAGE_COMPLETE':  '{:.2f}% completed, {} users remaining',
-    'TIME_ELAPSED':         'Time elapsed for {}: {}',
-    'DATE_CALCULATE':       'Deducing date for user {}',
-    'ALREADY_WITH_DATE':    'User {} already had a defined date',
-    'DATE_CALCULATED':      'User {} now has member since date {}',
-    'DATE_NOT_CALCULATED':  'User {} has a non inferable member since date',
+    'FILE_START':           'Starting with %s',
+    'REMOVED_USERS':        '%d removed, from %d to %d',
+    'CURRENT_STATE':        'Chunk size: %d - Remaining users: %d - Chunks removed: %d',
+    'PERCENTAGE_COMPLETE':  '%.2f%% completed, %d users remaining',
+    'TIME_ELAPSED':         'Time elapsed for %s: %d',
     'PICKLING':             'Saving data',
+    'START_DEDUCING':       'Starting with %s',
+    'USER_DATE_DEDUCED':    'Setting %s for user %d',
 }
 
 
@@ -154,8 +152,8 @@ def load_state(path):
         saved_users = sorted(load_users_csv(path), key=lambda x: x.id)
         users_without_dates = saved_users[:]
     else:
-        logger.info('Chunk size: {}'.format(state.chunk_size))
-        logger.info('Total users: {}'.format(len(state.users)))
+        logger.debug('Chunk size: %d', state.chunk_size)
+        logger.debug('Total users: %d', len(state.users))
 
         chunk_size = state.chunk_size
         saved_users = state.users
@@ -163,38 +161,6 @@ def load_state(path):
                                if user.member_since is None and not user.member_since_fetched]
 
     return chunk_size, saved_users, users_without_dates
-
-
-def deduce_dates(users_with_dates, users_without_dates):
-    """
-    Tries to set the dates for every user inside users_without_dates looking for the nearest previous and next users
-    with defined member since dates. If those dates are equal, it can be said that the user's date will be the same.
-
-    :param users_with_dates: Users with defined member since date
-    :param users_without_dates: Users without defined member since date
-    :return: None
-    """
-    logger = logging.getLogger(LOGGER_NAME)
-
-    def by_id(x):
-        return x.id
-
-    for user in users_without_dates:
-        if user.member_since is not None:
-            logger.info(MESSAGES['ALREADY_WITH_DATE'].format(user.id))
-            continue
-
-        prev_users = user.previous_users(users_with_dates)
-        prev_user = max(prev_users, key=by_id, default=None)
-
-        next_users = user.next_users(users_with_dates)
-        next_user = min(next_users, key=by_id, default=None)
-
-        if prev_user and next_user and prev_user.member_since == next_user.member_since:
-            logger.info(MESSAGES['DATE_CALCULATED'].format(user.id, prev_user.member_since))
-            user.member_since = prev_user.member_since
-        else:
-            logger.info(MESSAGES['DATE_NOT_CALCULATED'].format(user.id))
 
 
 def save_users(path, users):
@@ -226,7 +192,7 @@ def main(args):
              if path.replace('user_data/', '') not in os.listdir(user_with_dates_path))
 
     for path in paths:
-        logger.info(MESSAGES['FILE_START'].format(path))
+        logger.info(MESSAGES['FILE_START'], path)
 
         chunk_size, users, users_without_dates = load_state(path)
 
@@ -248,7 +214,7 @@ def main(args):
                 first_date, last_date = first_user.member_since, last_user.member_since
 
                 if first_date is not None and last_date is not None and first_date == last_date:
-                    logger.info(MESSAGES['REMOVED_USERS'].format(len(chunk), first_user.id, last_user.id))
+                    logger.debug(MESSAGES['REMOVED_USERS'], len(chunk), first_user.id, last_user.id)
 
                     chunks_removed += 1
                     for user in chunk:
@@ -264,17 +230,13 @@ def main(args):
             chunk_size >>= 1
             remaining_users = len(users_without_dates)
 
-            logger.debug(MESSAGES['CURRENT_STATE'].format(chunk_size, remaining_users, chunks_removed))
-            logger.info(MESSAGES['PERCENTAGE_COMPLETE'].format((1 - remaining_users / total_users) * 100,
-                                                               remaining_users))
+            logger.info(MESSAGES['CURRENT_STATE'], chunk_size, remaining_users, chunks_removed)
+            logger.info(MESSAGES['PERCENTAGE_COMPLETE'], (1 - remaining_users / total_users) * 100, remaining_users)
 
         end_time = time.time()
         logger.info(MESSAGES['TIME_ELAPSED'].format(path, end_time - start_time))
 
-        users_with_dates = filter(lambda x: x.member_since is not None, users)
-        deduce_dates(users_with_dates, users_without_dates)
         save_users(path.replace('user_data', 'user_with_dates'), users)
-
         pickle_state(None)
 
 

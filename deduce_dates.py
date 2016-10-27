@@ -1,10 +1,11 @@
 import csv
+import logging
 import os
 import re
 import sys
 from datetime import datetime
 
-from main import User
+from main import User, LOGGER_NAME, MESSAGES
 
 
 def has_member_since(user):
@@ -46,6 +47,9 @@ def save_users(folder, filename, users):
 
 
 def main(args):
+    logging.basicConfig(level=logging.DEBUG)
+    logger = logging.getLogger(LOGGER_NAME)
+
     csv.field_size_limit(sys.maxsize)
 
     user_with_dates_folder = args[1]
@@ -63,7 +67,8 @@ def main(args):
     next_users = get_users(prev_path)
 
     for i, _ in enumerate(paths[1:]):
-        print(paths[i])
+        logger.info(MESSAGES['START_DEDUCING'], prev_path)
+
         current_users = next_users
         next_users = get_users(paths[i])
 
@@ -75,7 +80,7 @@ def main(args):
                 if next_user is not None and last_member_since is not None:
                     have_same_date = next_user.member_since == last_member_since
                     if have_same_date:
-                        print(user.id)
+                        logger.debug(MESSAGES['USER_DATE_DEDUCED'], last_member_since.strftime('%Y-%m-%d'), user.id)
                         user.member_since = last_member_since
             else:
                 last_member_since = user.member_since
